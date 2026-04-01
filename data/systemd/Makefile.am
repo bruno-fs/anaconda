@@ -32,7 +32,9 @@ dist_systemd_DATA = anaconda.service \
                     anaconda-import-initramfs-certs.service \
                     anaconda-pre.service \
                     anaconda-s390-device-config-import.service \
-                    anaconda-fips.service
+                    anaconda-fips.service \
+                    cockpit-pin-auth@.service \
+                    cockpit-pin-auth.socket
 
 dist_generator_SCRIPTS = anaconda-generator
 
