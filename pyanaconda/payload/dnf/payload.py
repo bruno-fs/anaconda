@@ -32,6 +32,7 @@ from pyanaconda.core.constants import (
     SOURCE_TYPE_URL,
 )
 from pyanaconda.modules.common.constants.services import PAYLOADS
+from pyanaconda.modules.common.errors.installation import NonCriticalInstallationError
 from pyanaconda.modules.common.errors.payload import SourceSetupError
 from pyanaconda.modules.common.structures.packages import (
     PackagesConfigurationData,
@@ -359,7 +360,21 @@ class DNFPayload(MigratedDBusPayload):
             if side_payload_path:
                 side_payload = PAYLOADS.get_proxy(side_payload_path)
                 side_task_proxy = PAYLOADS.get_proxy(side_payload.CalculateSizeWithTask())
-                sync_run_task(side_task_proxy)
+                try:
+                    sync_run_task(side_task_proxy)
+                except NonCriticalInstallationError:
+                    # Ideally we would surface this error here, before
+                    # the installation starts, but there is no clean way
+                    # to show a continue/abort dialog from the spoke
+                    # thread. The FlatpakManager stores the error and
+                    # re-raises it during the install phase, where
+                    # pyanaconda.payload.migrated catches it and calls
+                    # errorHandler.cb() to show the dialog.
+                    # When --ignoremissing is set, _retry() does not
+                    # raise at all — this catch is only reached when
+                    # the user did NOT set --ignoremissing.
+                    log.warning("Flatpak size calculation failed; the error "
+                                "will be reported during installation.")
 
         # This validation is no longer required.
         self._software_validation_required = False

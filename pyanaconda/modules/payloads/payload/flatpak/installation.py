@@ -83,7 +83,7 @@ class CleanUpDownloadLocationTask(Task):
         """Run the task."""
         path = self._flatpak_manager.download_location
 
-        if not os.path.exists(path):
+        if not path or not os.path.exists(path):
             # If nothing was downloaded, there is nothing to clean up.
             return
 
