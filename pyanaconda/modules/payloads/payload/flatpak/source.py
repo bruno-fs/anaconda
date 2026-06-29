@@ -94,6 +94,16 @@ class FlatpakSource(ABC):
     This class represents a source for OCI image layout where multiple images can be present.
     """
 
+    @property
+    @abstractmethod
+    def retry_count(self) -> int:
+        """Number of retry attempts for operations on this source.
+
+        Network sources should return a value > 1 to handle transient
+        failures (CDN/registry instability). Local sources should return 1
+        since a missing Flatpaks/ directory won't resolve on retry.
+        """
+
     @abstractmethod
     def calculate_size(self, refs: List[str]) -> Tuple[int, int]:
         """Calculate the total download and installed size of the images in refs and
@@ -193,6 +203,10 @@ class FlatpakStaticSource(FlatpakSource):
 
     https://github.com/opencontainers/image-spec/blob/main/image-layout.md
     """
+
+    @property
+    def retry_count(self):
+        return 1
 
     def __init__(self, repository_config: RepoConfigurationData, relative_path: str = "Flatpaks"):
         """Create a new source.
@@ -377,6 +391,10 @@ class FlatpakRegistrySource(FlatpakSource):
 
     https://github.com/flatpak/flatpak-oci-specs/blob/main/registry-index.md
     """
+
+    @property
+    def retry_count(self):
+        return 3
 
     def __init__(self, url):
         self._index = None

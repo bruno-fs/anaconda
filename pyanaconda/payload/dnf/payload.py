@@ -32,6 +32,7 @@ from pyanaconda.core.constants import (
     SOURCE_TYPE_URL,
 )
 from pyanaconda.modules.common.constants.services import PAYLOADS
+from pyanaconda.modules.common.errors.installation import NonCriticalInstallationError
 from pyanaconda.modules.common.errors.payload import SourceSetupError
 from pyanaconda.modules.common.structures.packages import (
     PackagesConfigurationData,
@@ -359,7 +360,26 @@ class DNFPayload(MigratedDBusPayload):
             if side_payload_path:
                 side_payload = PAYLOADS.get_proxy(side_payload_path)
                 side_task_proxy = PAYLOADS.get_proxy(side_payload.CalculateSizeWithTask())
-                sync_run_task(side_task_proxy)
+                try:
+                    sync_run_task(side_task_proxy)
+                except NonCriticalInstallationError:
+                    # This runs in the spoke thread (THREAD_CHECK_SOFTWARE),
+                    # not in the install task chain. Letting the exception
+                    # propagate would kill the thread and leave the spoke
+                    # stuck in "checking" state. The FlatpakManager stores
+                    # the error and re-raises it during the install phase,
+                    # where migrated.py's handler shows the continue/abort
+                    # dialog to the user.
+                    #
+                    # NOTE: On the main branch (Fedora rawhide), PR #6983
+                    # ("Handle non-critical installation errors in GUI/TUI
+                    # progress spokes") adds an API for surfacing non-critical
+                    # errors from any thread — simply raising the exception
+                    # still wouldn't work, but that API provides the proper
+                    # way to do it. It is not available on rhel-10, so we
+                    # use this store-and-reraise pattern instead.
+                    log.warning("Flatpak size calculation failed; the error "
+                                "will be reported during installation.")
 
         # This validation is no longer required.
         self._software_validation_required = False

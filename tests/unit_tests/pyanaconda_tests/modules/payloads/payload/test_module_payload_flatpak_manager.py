@@ -53,6 +53,16 @@ from gi.repository.Flatpak import TransactionOperationType
 REMOTE_NAME = "Anaconda"
 REMOTE_PATH = "file:///flatpak/repo"
 
+TEST_REF = "org.fedoraproject.Stable:app/org.example.App1/amd64/stable"
+
+
+def _mock_installed_ref(ref_str):
+    """Create a mock InstalledRef with the given format_ref() return."""
+    ref = Mock()
+    ref.format_ref.return_value = ref_str
+    return ref
+
+
 
 class FlatpakManagerTestCase:
     """Test FlatpakManager of the Flatpak module."""
@@ -240,7 +250,7 @@ class FlatpakManagerTestCase:
     @patch.object(FlatpakManager, "get_source")
     def test_calculate_size(self, get_source_mock):
         """Test FlatpakManager the calculate_size method."""
-        source = Mock()
+        source = Mock(spec=FlatpakStaticSource, retry_count=1)
         source.calculate_size.return_value = (10, 20)
         get_source_mock.return_value = source
 
@@ -263,18 +273,77 @@ class FlatpakManagerTestCase:
         assert fm.download_size == 10
         assert fm.install_size == 20
 
-        # set skip installation to True if no source is set
+        # raise NonCriticalInstallationError when source fails
         fm._skip_installation = False
         refs = ["org.fedoraproject.Stable:app/org.example.App1/amd64/stable"]
         source.calculate_size.side_effect = SourceSetupError
         fm.set_flatpak_refs(refs)
-        fm.calculate_size()
+
+        with pytest.raises(NonCriticalInstallationError, match="source is not available.*App1"):
+            fm.calculate_size()
+
         assert fm.skip_installation is True
+
+    @patch.object(FlatpakManager, "get_source")
+    def test_calculate_size_ignored_when_missing_ignored(self, get_source_mock):
+        """calculate_size does not raise when missing_ignored is set."""
+        source = Mock(spec=FlatpakStaticSource, retry_count=1)
+        source.calculate_size.side_effect = SourceSetupError
+        get_source_mock.return_value = source
+
+        fm = FlatpakManager()
+        refs = ["app/org.example.App1/amd64/stable"]
+        fm.set_flatpak_refs(refs)
+        fm.set_ignore_missing(True)
+
+        fm.calculate_size()
+
+        assert fm.skip_installation is True
+
+    @patch("pyanaconda.modules.payloads.payload.flatpak.flatpak_manager.time")
+    @patch.object(FlatpakManager, "get_source")
+    def test_calculate_size_retries_on_network_source(self, get_source_mock, time_mock):
+        """calculate_size retries on FlatpakRegistrySource failures."""
+        source = Mock(spec=FlatpakRegistrySource, retry_count=3)
+        source.calculate_size.side_effect = [
+            SourceSetupError("fail1"),
+            SourceSetupError("fail2"),
+            (100, 200),
+        ]
+        get_source_mock.return_value = source
+
+        fm = FlatpakManager()
+        refs = ["app/org.example.App1/amd64/stable"]
+        fm.set_flatpak_refs(refs)
+        fm.calculate_size()
+
+        assert source.calculate_size.call_count == 3
+        assert fm.download_size == 100
+        assert fm.install_size == 200
+        assert time_mock.sleep.call_count == 2
+
+    @patch("pyanaconda.modules.payloads.payload.flatpak.flatpak_manager.time")
+    @patch.object(FlatpakManager, "get_source")
+    def test_calculate_size_no_retry_on_local_source(self, get_source_mock, time_mock):
+        """calculate_size does not retry on FlatpakStaticSource failures."""
+        source = Mock(spec=FlatpakStaticSource, retry_count=1)
+        source.calculate_size.side_effect = SourceSetupError("fail")
+        get_source_mock.return_value = source
+
+        fm = FlatpakManager()
+        refs = ["app/org.example.App1/amd64/stable"]
+        fm.set_flatpak_refs(refs)
+
+        with pytest.raises(NonCriticalInstallationError):
+            fm.calculate_size()
+
+        source.calculate_size.assert_called_once()
+        time_mock.sleep.assert_not_called()
 
     @patch.object(FlatpakManager, "get_source")
     def test_download(self, get_source_mock):
         """Test FlatpakManager the download method."""
-        source = Mock()
+        source = Mock(spec=FlatpakStaticSource, retry_count=1)
         source.download.return_value = "download_location"
         get_source_mock.return_value = source
         progress = Mock()
@@ -300,14 +369,38 @@ class FlatpakManagerTestCase:
                                                 "test-location",
                                                 progress)
 
-        # source is not ready
+        # raise NonCriticalInstallationError when source fails
         fm._skip_installation = False
         refs = ["org.fedoraproject.Stable:app/org.example.App1/amd64/stable"]
         fm.set_flatpak_refs(refs)
         fm.set_download_location("test-location")
         source.download.side_effect = SourceSetupError
-        fm.download(progress)
+
+        with pytest.raises(NonCriticalInstallationError, match="source is not available.*App1"):
+            fm.download(progress)
+
         assert fm.skip_installation is True
+
+    @patch("pyanaconda.modules.payloads.payload.flatpak.flatpak_manager.time")
+    @patch.object(FlatpakManager, "get_source")
+    def test_download_retries_on_network_source(self, get_source_mock, time_mock):
+        """download retries on FlatpakRegistrySource failures."""
+        source = Mock(spec=FlatpakRegistrySource, retry_count=3)
+        source.download.side_effect = [
+            SourceSetupError("fail1"),
+            "download_location",
+        ]
+        get_source_mock.return_value = source
+        progress = Mock()
+
+        fm = FlatpakManager()
+        refs = ["app/org.example.App1/amd64/stable"]
+        fm.set_flatpak_refs(refs)
+        fm.set_download_location("test-location")
+        fm.download(progress)
+
+        assert source.download.call_count == 2
+        assert time_mock.sleep.call_count == 1
 
     @patch("pyanaconda.modules.payloads.payload.flatpak.flatpak_manager.Transaction")
     @patch("pyanaconda.modules.payloads.payload.flatpak.flatpak_manager.Installation")
@@ -334,8 +427,9 @@ class FlatpakManagerTestCase:
 
         # Working prerequisites
         fm._skip_installation = False
-        refs = ["org.fedoraproject.Stable:app/org.example.App1/amd64/stable"]
+        refs = [TEST_REF]
         fm.set_flatpak_refs(refs)
+        installation.list_installed_refs.return_value = [_mock_installed_ref(TEST_REF)]
 
         # run installation
         fm.install(progress)
@@ -357,12 +451,13 @@ class FlatpakManagerTestCase:
         remote = Mock()
         remote.get_url.return_value = "https://example.org"
         installation.list_remotes.return_value = [remote]
+        installation.list_installed_refs.return_value = [_mock_installed_ref(TEST_REF)]
 
         fm = FlatpakManager()
 
         # Working prerequisites
         fm._skip_installation = False
-        refs = ["org.fedoraproject.Stable:app/org.example.App1/amd64/stable"]
+        refs = [TEST_REF]
         fm.set_flatpak_refs(refs)
 
         # set collection
@@ -395,12 +490,13 @@ class FlatpakManagerTestCase:
         remote1.get_url.return_value = "https://example.org"
         remote1.get_name.return_value = "remote1"
         installation.list_remotes.return_value = [remote, remote1]
+        installation.list_installed_refs.return_value = [_mock_installed_ref(TEST_REF)]
 
         fm = FlatpakManager()
 
         # Working prerequisites
         fm._skip_installation = False
-        refs = ["org.fedoraproject.Stable:app/org.example.App1/amd64/stable"]
+        refs = [TEST_REF]
         fm.set_flatpak_refs(refs)
 
         # set collection
@@ -436,19 +532,91 @@ class FlatpakManagerTestCase:
         is_subscription_module_available.return_value = False
 
         fm = FlatpakManager()
+        fm._source = Mock(spec=FlatpakStaticSource, retry_count=1)
 
         # Working prerequisites
         fm._skip_installation = False
         refs = ["org.fedoraproject.Stable:app/org.example.App1/amd64/stable"]
         fm.set_flatpak_refs(refs)
 
-        # raise error on transaction run
+        # raise error on transaction run (local source = no retry)
         transaction.run.side_effect = GError("Test error")
 
         # run installation
         with pytest.raises(NonCriticalInstallationError):
             fm.install(progress)
+        transaction.run.assert_called_once()
+        transaction.run_dispose.assert_called()
+
+    @patch("pyanaconda.modules.payloads.payload.flatpak.flatpak_manager.Transaction")
+    @patch("pyanaconda.modules.payloads.payload.flatpak.flatpak_manager.Installation")
+    @patch("pyanaconda.modules.payloads.payload.flatpak.flatpak_manager.is_module_available")
+    def test_install_raises_on_missing_flatpaks(self, is_sub_available, installation_mock, transaction_mock):
+        """install() raises NonCriticalInstallationError when flatpaks are missing after install."""
+        progress = Mock()
+        installation = Mock()
+        transaction = Mock()
+        installation_mock.new_system.return_value = installation
+        transaction_mock.new_for_installation.return_value = transaction
+        is_sub_available.return_value = False
+        installation.list_installed_refs.return_value = []
+
+        fm = FlatpakManager()
+        fm._skip_installation = False
+        fm.set_flatpak_refs(["app/org.example.App1//stable"])
+
+        with pytest.raises(NonCriticalInstallationError, match="not installed"):
+            fm.install(progress)
+
+        transaction.run.assert_called_once()
         transaction.run_dispose.assert_called_once()
+
+    @patch("pyanaconda.modules.payloads.payload.flatpak.flatpak_manager.Transaction")
+    @patch("pyanaconda.modules.payloads.payload.flatpak.flatpak_manager.Installation")
+    @patch("pyanaconda.modules.payloads.payload.flatpak.flatpak_manager.is_module_available")
+    def test_install_succeeds_with_arch_in_installed_ref(self, is_sub_available, installation_mock, transaction_mock):
+        """install() succeeds when installed ref has arch but requested ref has empty arch."""
+        progress = Mock()
+        installation = Mock()
+        transaction = Mock()
+        installation_mock.new_system.return_value = installation
+        transaction_mock.new_for_installation.return_value = transaction
+        is_sub_available.return_value = False
+        installation.list_installed_refs.return_value = [
+            _mock_installed_ref("app/org.example.App1/x86_64/stable")
+        ]
+
+        fm = FlatpakManager()
+        fm._skip_installation = False
+        fm.set_flatpak_refs(["app/org.example.App1//stable"])
+
+        fm.install(progress)
+        transaction.run.assert_called_once()
+
+    @patch("pyanaconda.modules.payloads.payload.flatpak.flatpak_manager.time")
+    @patch("pyanaconda.modules.payloads.payload.flatpak.flatpak_manager.Transaction")
+    @patch("pyanaconda.modules.payloads.payload.flatpak.flatpak_manager.Installation")
+    @patch("pyanaconda.modules.payloads.payload.flatpak.flatpak_manager.is_module_available")
+    def test_install_retries_on_network_source(self, is_sub_available, installation_mock, transaction_mock, time_mock):
+        """install() retries transaction.run() on GError for network sources."""
+        progress = Mock()
+        installation = Mock()
+        transaction = Mock()
+        installation_mock.new_system.return_value = installation
+        transaction_mock.new_for_installation.return_value = transaction
+        is_sub_available.return_value = False
+        installation.list_installed_refs.return_value = [_mock_installed_ref(TEST_REF)]
+        transaction.run.side_effect = [GError("transient"), None]
+
+        fm = FlatpakManager()
+        fm._skip_installation = False
+        fm._source = Mock(spec=FlatpakRegistrySource, retry_count=3)
+        fm.set_flatpak_refs([TEST_REF])
+
+        fm.install(progress)
+
+        assert transaction.run.call_count == 2
+        assert time_mock.sleep.call_count == 1
 
     def _create_transaction_operation(self):
         operation = Mock()

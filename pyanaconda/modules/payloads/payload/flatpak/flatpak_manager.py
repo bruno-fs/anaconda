@@ -19,6 +19,8 @@
 #
 
 
+import time
+from functools import partial
 from typing import List, Optional
 
 import gi
@@ -60,6 +62,8 @@ __all__ = ["FlatpakManager"]
 # guaranteed not to resolve by RFC 2606
 INVALID_DOWNLOAD_URL = 'oci+https://no-download.invalid'
 
+RETRY_BACKOFF_BASE = 2
+
 
 class FlatpakManager:
     """Root object for handling Flatpak pre-installation"""
@@ -73,6 +77,8 @@ class FlatpakManager:
 
         self._source = None
         self._skip_installation = True
+        self._ignore_missing = False
+        self._pending_error = None
         # location of the local installation source ready for installation in flatpak format
         self._collection_location = None
         self._progress: Optional[ProgressReporter] = None
@@ -167,6 +173,14 @@ class FlatpakManager:
         else:
             self._source = None
 
+    def set_ignore_missing(self, ignore_missing: bool):
+        """Set whether missing flatpaks should be ignored.
+
+        When True, flatpak source errors are logged but do not raise
+        NonCriticalInstallationError — matching %packages --ignoremissing.
+        """
+        self._ignore_missing = ignore_missing
+
     def set_flatpak_refs(self, refs: Optional[List[str]]):
         """Set the Flatpak refs to be installed.
 
@@ -201,6 +215,49 @@ class FlatpakManager:
 
         return self._source
 
+    def _retry(self, *, operation, args=(), catch, user_message, attempts, on_failure=None):
+        """Run an operation with retry and exponential backoff.
+
+        On exhausted retries, raises NonCriticalInstallationError unless
+        %packages --ignoremissing is set.
+
+        :param callable operation: the operation to attempt
+        :param tuple args: positional arguments to pass to operation
+        :param tuple catch: exception types to catch and retry on
+        :param str user_message: translatable message for NonCriticalInstallationError
+        :param int attempts: number of attempts
+        :param callable on_failure: optional callback after each failed attempt
+        :return: the return value of operation() on success, or None on suppressed failure
+        """
+        last_error = None
+
+        for attempt in range(attempts):
+            try:
+                return operation(*args)
+            except catch as e:
+                last_error = e
+                if on_failure:
+                    on_failure(e)
+                if attempt < attempts - 1:
+                    delay = RETRY_BACKOFF_BASE ** (attempt + 1)
+                    log.warning("%s (attempt %d/%d), retrying in %ds: %s",
+                                user_message, attempt + 1, attempts, delay, e)
+                    time.sleep(delay)
+
+        # All attempts exhausted.
+        log.error("%s: %s", user_message, last_error)
+        # Prevent subsequent download/install tasks from running without a valid source.
+        self._skip_installation = True
+        if not self._ignore_missing:
+            error = NonCriticalInstallationError(user_message)
+            # Can't use 'raise ... from' — the error is stored for deferred re-raise.
+            error.__cause__ = last_error
+            # Store for re-raise during the install phase — the spoke may
+            # catch this raise, but the install chain needs to surface it.
+            self._pending_error = error
+            raise error
+        return None
+
     def calculate_size(self):
         """Calculate the download and install size of the Flatpak content.
 
@@ -208,19 +265,29 @@ class FlatpakManager:
         """
         if self._skip_installation:
             log.debug("Flatpak installation is going to be skipped.")
+            # Re-raise the stored error so the install chain's error handler
+            # can surface it to the user (the spoke may have swallowed it).
+            if self._pending_error:
+                error = self._pending_error
+                self._pending_error = None
+                raise error
             return
 
         if len(self._flatpak_refs) == 0:
             log.debug("No flatpaks are marked for installation.")
             return
 
-        try:
-            self._download_size, self._install_size = \
-                self.get_source().calculate_size(self._flatpak_refs)
-        except SourceSetupError as e:
-            log.error("Flatpak source not available, skipping size calculation %s: %s",
-                      ", ".join(self._flatpak_refs), e)
-            self._skip_installation = True
+        # SourceSetupError: missing index.json; OSError: HTTP failures; ValueError: corrupted manifest JSON.
+        result = self._retry(
+            operation=self.get_source().calculate_size,
+            args=(self._flatpak_refs,),
+            catch=(SourceSetupError, OSError, ValueError),
+            attempts=self.get_source().retry_count,
+            user_message=_("Cannot install the following Flatpaks because the source is not "
+                           "available: {refs}").format(refs=", ".join(self._flatpak_refs)),
+        )
+        if result is not None:
+            self._download_size, self._install_size = result
 
     @property
     def download_size(self):
@@ -250,14 +317,17 @@ class FlatpakManager:
             log.debug("No flatpaks are marked for download.")
             return
 
-        try:
-            self._collection_location = self.get_source().download(self._flatpak_refs,
-                                                                   self._download_location,
-                                                                   progress)
-        except SourceSetupError as e:
-            log.error("Flatpak source not available, skipping download %s: %s",
-                      ", ".join(self._flatpak_refs), e)
-            self._skip_installation = True
+        # OSError covers requests.HTTPError (blob download failures) in addition to SourceSetupError.
+        result = self._retry(
+            operation=self.get_source().download,
+            args=(self._flatpak_refs, self._download_location, progress),
+            catch=(SourceSetupError, OSError),
+            attempts=self.get_source().retry_count,
+            user_message=_("Cannot download Flatpaks because the source is not available: "
+                           "{refs}").format(refs=", ".join(self._flatpak_refs)),
+        )
+        if result is not None:
+            self._collection_location = result
 
     def install(self, progress: ProgressReporter):
         """Install the Flatpak content to the target system.
@@ -306,9 +376,19 @@ class FlatpakManager:
             self._transaction.add_sync_preinstalled()
 
             self._progress = progress
-            self._transaction.run()
-        except GError as e:
-            raise NonCriticalInstallationError("Failed to install flatpaks: {}".format(e)) from e
+
+            self._retry(
+                operation=self._transaction.run,
+                catch=(GError,),
+                attempts=self.get_source().retry_count,
+                user_message=_("Failed to install Flatpaks"),
+                on_failure=partial(
+                    self._rebuild_transaction, installation),
+            )
+
+            if not self._skip_installation:
+                # Defensive: verify flatpaks are actually present after a successful transaction.
+                self._verify_installed_flatpaks(installation)
         finally:
             if self._transaction:
                 self._transaction.run_dispose()
@@ -318,6 +398,49 @@ class FlatpakManager:
                 self._reenable_network_download(installation, saved_urls)
 
             self._progress = None
+
+    @staticmethod
+    def _ref_matches(requested, installed_ref_str):
+        """Check if a requested ref matches an installed ref.
+
+        Requested refs may have an empty arch field (e.g. app/org.mozilla.firefox//stable)
+        while installed refs always include the arch (e.g. app/org.mozilla.firefox/x86_64/stable).
+        """
+        req_parts = requested.split("/")
+        inst_parts = installed_ref_str.split("/")
+
+        # Refs should be kind/id/arch/branch (4 parts). Fall back to exact match
+        # for unexpected formats so we don't silently skip a valid ref.
+        if len(req_parts) != 4 or len(inst_parts) != 4:
+            return requested == installed_ref_str
+
+        for req, inst in zip(req_parts, inst_parts):
+            if req and req != inst:
+                return False
+        return True
+
+    def _verify_installed_flatpaks(self, installation):
+        """Verify that all requested flatpaks were actually installed.
+
+        :raises NonCriticalInstallationError: if any requested flatpaks are
+            missing (unless _ignore_missing is set)
+        """
+        installed = installation.list_installed_refs()
+        installed_ref_strs = [ref.format_ref() for ref in installed]
+        log.debug("Installed flatpak refs: %s", installed_ref_strs)
+
+        missing = [
+            ref for ref in self._flatpak_refs
+            if not any(self._ref_matches(ref, inst) for inst in installed_ref_strs)
+        ]
+
+        if missing:
+            msg = _("The following Flatpaks were not installed: "
+                    "{refs}").format(refs=", ".join(missing))
+            if self._ignore_missing:
+                log.warning("%s", msg)
+                return
+            raise NonCriticalInstallationError(msg)
 
     def _update_repo_with_source_url(self, installation, source, remote):
         """Update Flatpak repo with provided source URL.
@@ -344,6 +467,18 @@ class FlatpakManager:
         transaction.connect("operation_error", self._operation_error_callback)
 
         return transaction
+
+    def _rebuild_transaction(self, installation, _error):
+        """Dispose the current transaction and create a fresh one.
+
+        Transaction has no reset() — must dispose and recreate on retry.
+        """
+        self._transaction.run_dispose()
+        self._transaction = self._create_flatpak_transaction(installation)
+        if self._collection_location:
+            self._transaction.add_sideload_image_collection(
+                self._collection_location, None)
+        self._transaction.add_sync_preinstalled()
 
     # FlatpakTransaction.set_no_pull() does not leave sideload
     # repositories working - it basically entirely disables all
