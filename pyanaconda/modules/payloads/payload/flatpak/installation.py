@@ -83,8 +83,8 @@ class CleanUpDownloadLocationTask(Task):
         """Run the task."""
         path = self._flatpak_manager.download_location
 
+        # path is None when calculate_size() raised before set_download_location() ran.
         if not path or not os.path.exists(path):
-            # If nothing was downloaded, there is nothing to clean up.
             return
 
         log.info("Removing downloaded Flatpaks from %s.", path)

@@ -31,7 +31,9 @@ from pyanaconda.core.i18n import _
 from pyanaconda.core.threads import thread_manager
 from pyanaconda.errors import ERROR_RAISE
 from pyanaconda.errors import errorHandler as error_handler
-from pyanaconda.modules.common.errors.payload import SourceSetupError
+from pyanaconda.modules.common.errors.payload import (
+    NonCriticalSourceSetupError,
+)
 from pyanaconda.modules.common.structures.validation import ValidationReport
 from pyanaconda.modules.common.task.progress import ProgressReporter
 from pyanaconda.modules.common.task.runnable import Runnable
@@ -40,10 +42,6 @@ log = get_module_logger(__name__)
 
 __all__ = ["payloadMgr", "NonCriticalSourceSetupError"]
 
-
-class NonCriticalSourceSetupError(SourceSetupError):
-    """Non-critical error raised during the source setup."""
-    pass
 
 
 class _PayloadManager(Runnable, ProgressReporter):

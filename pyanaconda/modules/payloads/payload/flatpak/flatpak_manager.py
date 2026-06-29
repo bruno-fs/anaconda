@@ -19,8 +19,6 @@
 #
 
 
-import time
-from functools import partial
 from typing import List, Optional
 
 import gi
@@ -33,7 +31,10 @@ from pyanaconda.modules.common.constants.services import SUBSCRIPTION
 from pyanaconda.modules.common.errors.installation import (
     NonCriticalInstallationError,
 )
-from pyanaconda.modules.common.errors.payload import SourceSetupError
+from pyanaconda.modules.common.errors.payload import (
+    NonCriticalSourceSetupError,
+    SourceSetupError,
+)
 from pyanaconda.modules.common.structures.subscription import SubscriptionRequest
 from pyanaconda.modules.common.task.progress import ProgressReporter
 from pyanaconda.modules.common.util import is_module_available
@@ -62,9 +63,6 @@ __all__ = ["FlatpakManager"]
 # guaranteed not to resolve by RFC 2606
 INVALID_DOWNLOAD_URL = 'oci+https://no-download.invalid'
 
-RETRY_BACKOFF_BASE = 2
-
-
 class FlatpakManager:
     """Root object for handling Flatpak pre-installation"""
 
@@ -78,7 +76,6 @@ class FlatpakManager:
         self._source = None
         self._skip_installation = True
         self._ignore_missing = False
-        self._pending_error = None
         # location of the local installation source ready for installation in flatpak format
         self._collection_location = None
         self._progress: Optional[ProgressReporter] = None
@@ -215,46 +212,6 @@ class FlatpakManager:
 
         return self._source
 
-    def _retry(self, *, operation, args=(), catch, user_message, attempts, on_failure=None):
-        """Run an operation with retry and exponential backoff.
-
-        On exhausted retries, raises NonCriticalInstallationError unless
-        %packages --ignoremissing is set.
-
-        :param callable operation: the operation to attempt
-        :param tuple args: positional arguments to pass to operation
-        :param tuple catch: exception types to catch and retry on
-        :param str user_message: translatable message for NonCriticalInstallationError
-        :param int attempts: number of attempts
-        :param callable on_failure: optional callback after each failed attempt
-        :return: the return value of operation() on success, or None on suppressed failure
-        """
-        last_error = None
-
-        for attempt in range(attempts):
-            try:
-                return operation(*args)
-            except catch as e:
-                last_error = e
-                if on_failure:
-                    on_failure(e)
-                if attempt < attempts - 1:
-                    delay = RETRY_BACKOFF_BASE ** (attempt + 1)
-                    log.warning("%s (attempt %d/%d), retrying in %ds: %s",
-                                user_message, attempt + 1, attempts, delay, e)
-                    time.sleep(delay)
-
-        # All attempts exhausted.
-        log.error("%s: %s", user_message, last_error)
-        # Prevent subsequent download/install tasks from running without a valid source.
-        self._skip_installation = True
-        if not self._ignore_missing:
-            error = NonCriticalInstallationError(user_message)
-            error.__cause__ = last_error
-            self._pending_error = error
-            raise error
-        return None
-
     def calculate_size(self):
         """Calculate the download and install size of the Flatpak content.
 
@@ -262,27 +219,26 @@ class FlatpakManager:
         """
         if self._skip_installation:
             log.debug("Flatpak installation is going to be skipped.")
-            if self._pending_error:
-                error = self._pending_error
-                self._pending_error = None
-                raise error
             return
 
         if len(self._flatpak_refs) == 0:
             log.debug("No flatpaks are marked for installation.")
             return
 
+        try:
+            self._download_size, self._install_size = \
+                self.get_source().calculate_size(self._flatpak_refs)
         # SourceSetupError: missing index.json; OSError: HTTP failures; ValueError: corrupted manifest JSON.
-        result = self._retry(
-            operation=self.get_source().calculate_size,
-            args=(self._flatpak_refs,),
-            catch=(SourceSetupError, OSError, ValueError),
-            attempts=self.get_source().retry_count,
-            user_message=_("Cannot install the following Flatpaks because the source is not "
-                           "available: {refs}").format(refs=", ".join(self._flatpak_refs)),
-        )
-        if result is not None:
-            self._download_size, self._install_size = result
+        except (SourceSetupError, OSError, ValueError) as e:
+            log.error("Flatpak source not available for %s: %s",
+                      ", ".join(self._flatpak_refs), e)
+            self._skip_installation = True
+            if not self._ignore_missing:
+                raise NonCriticalSourceSetupError(
+                    _("Cannot install the following Flatpaks because the source "
+                      "is not available: {refs}").format(
+                          refs=", ".join(self._flatpak_refs))
+                ) from e
 
     @property
     def download_size(self):
@@ -312,17 +268,19 @@ class FlatpakManager:
             log.debug("No flatpaks are marked for download.")
             return
 
-        # OSError covers requests.HTTPError (blob download failures) in addition to SourceSetupError.
-        result = self._retry(
-            operation=self.get_source().download,
-            args=(self._flatpak_refs, self._download_location, progress),
-            catch=(SourceSetupError, OSError),
-            attempts=self.get_source().retry_count,
-            user_message=_("Cannot download Flatpaks because the source is not available: "
-                           "{refs}").format(refs=", ".join(self._flatpak_refs)),
-        )
-        if result is not None:
-            self._collection_location = result
+        try:
+            self._collection_location = self.get_source().download(
+                self._flatpak_refs, self._download_location, progress)
+        except (SourceSetupError, OSError) as e:
+            log.error("Flatpak download failed for %s: %s",
+                      ", ".join(self._flatpak_refs), e)
+            self._skip_installation = True
+            if not self._ignore_missing:
+                raise NonCriticalInstallationError(
+                    _("Cannot download Flatpaks because the source is not "
+                      "available: {refs}").format(
+                          refs=", ".join(self._flatpak_refs))
+                ) from e
 
     def install(self, progress: ProgressReporter):
         """Install the Flatpak content to the target system.
@@ -371,19 +329,17 @@ class FlatpakManager:
             self._transaction.add_sync_preinstalled()
 
             self._progress = progress
+            self._transaction.run()
 
-            self._retry(
-                operation=self._transaction.run,
-                catch=(GError,),
-                attempts=self.get_source().retry_count,
-                user_message=_("Failed to install Flatpaks"),
-                on_failure=partial(
-                    self._rebuild_transaction, installation),
-            )
-
-            if not self._skip_installation:
-                # Defensive: verify flatpaks are actually present after a successful transaction.
-                self._verify_installed_flatpaks(installation)
+            # Defensive: verify flatpaks are actually present after a successful transaction.
+            self._verify_installed_flatpaks(installation)
+        except GError as e:
+            log.error("Flatpak install failed: %s", e)
+            if self._ignore_missing:
+                return
+            raise NonCriticalInstallationError(
+                _("Failed to install Flatpaks: {error}").format(error=e)
+            ) from e
         finally:
             if self._transaction:
                 self._transaction.run_dispose()
@@ -430,12 +386,14 @@ class FlatpakManager:
         ]
 
         if missing:
-            msg = _("The following Flatpaks were not installed: "
-                    "{refs}").format(refs=", ".join(missing))
+            log.warning("Flatpaks not found after install: %s",
+                        ", ".join(missing))
             if self._ignore_missing:
-                log.warning("%s", msg)
                 return
-            raise NonCriticalInstallationError(msg)
+            raise NonCriticalInstallationError(
+                _("The following Flatpaks were not installed: "
+                  "{refs}").format(refs=", ".join(missing))
+            )
 
     def _update_repo_with_source_url(self, installation, source, remote):
         """Update Flatpak repo with provided source URL.
@@ -462,18 +420,6 @@ class FlatpakManager:
         transaction.connect("operation_error", self._operation_error_callback)
 
         return transaction
-
-    def _rebuild_transaction(self, installation, _error):
-        """Dispose the current transaction and create a fresh one.
-
-        Transaction has no reset() — must dispose and recreate on retry.
-        """
-        self._transaction.run_dispose()
-        self._transaction = self._create_flatpak_transaction(installation)
-        if self._collection_location:
-            self._transaction.add_sideload_image_collection(
-                self._collection_location, None)
-        self._transaction.add_sync_preinstalled()
 
     # FlatpakTransaction.set_no_pull() does not leave sideload
     # repositories working - it basically entirely disables all

@@ -110,6 +110,7 @@ class ErrorHandler(object):
 
             # Payload DBus errors
             SourceSetupError.__name__: self._payload_setup_handler,
+            "NonCriticalSourceSetupError": self._non_critical_source_setup_handler,
             PayloadInstallationError.__name__: self._payload_install_handler,
 
             # Subscription related errors
@@ -172,6 +173,17 @@ class ErrorHandler(object):
 
         self.ui.showError(message)
         return ERROR_RAISE
+
+    def _non_critical_source_setup_handler(self, exn):
+        message = _("The following error occurred while setting up a secondary "
+                    "source. Would you like to ignore this and continue with "
+                    "installation?")
+        message += "\n\n" + str(exn)
+
+        if self.ui.showYesNoQuestion(message):
+            return ERROR_CONTINUE
+        else:
+            return ERROR_RAISE
 
     def _bootloader_error_handler(self, exn):
         message = _("The following error occurred while installing the boot loader. "
