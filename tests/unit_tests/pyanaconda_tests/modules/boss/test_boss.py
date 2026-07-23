@@ -24,9 +24,9 @@ from dasbus.typing import *  # pylint: disable=wildcard-import
 from pyanaconda.core.constants import DEFAULT_LANG
 from pyanaconda.modules.boss.boss import Boss
 from pyanaconda.modules.boss.boss_interface import BossInterface
-from pyanaconda.modules.common.constants.installation import InstallationStatus
 from pyanaconda.modules.boss.installation import RunInstallationTask
 from pyanaconda.modules.boss.module_manager.start_modules import StartModulesTask
+from pyanaconda.modules.common.constants.installation import InstallationStatus
 from pyanaconda.modules.common.structures.requirement import Requirement
 from tests.unit_tests.pyanaconda_tests import (
     check_task_creation,
@@ -290,7 +290,7 @@ class BossInterfaceTestCase(unittest.TestCase):
 
     @patch_dbus_publish_object
     def test_installation_status_running(self, publisher):
-        """Test that InstallationStatus changes to RUNNING on start."""
+        """Test that InstallationStatus changes to RUNNING when started."""
         callback = Mock()
         self.module.installation_status_changed.connect(callback)
 
@@ -324,20 +324,31 @@ class BossInterfaceTestCase(unittest.TestCase):
     @patch_dbus_publish_object
     def test_installation_status_failed(self, publisher):
         """Test that InstallationStatus changes to FAILED on failure."""
-        callback = Mock()
-        self.module.installation_status_changed.connect(callback)
+        status_callback = Mock()
+        error_callback = Mock()
+        self.module.installation_status_changed.connect(status_callback)
+        self.module.pending_error_changed.connect(error_callback)
 
         task_paths = self.interface.InstallWithTasks()
-        check_task_creation(task_paths[0], publisher, RunInstallationTask)
+        task_proxy = check_task_creation(task_paths[0], publisher, RunInstallationTask)
+        task = task_proxy.implementation
+
+        # Simulate a fatal error stored on the task.
+        task._pending_error_message = "Something went wrong"
+        task._pending_error_type = "fatal"
 
         self.module._on_installation_started()
-        callback.reset_mock()
+        status_callback.reset_mock()
 
         self.module._on_installation_failed()
 
         assert self.interface.InstallationStatus == 3
         assert self.module.installation_status == InstallationStatus.FAILED
-        callback.assert_called()
+        status_callback.assert_called()
+
+        assert self.interface.PendingErrorMessage == "Something went wrong"
+        assert self.interface.PendingErrorType == "fatal"
+        error_callback.assert_called()
 
     def test_quit(self):
         """Test Quit."""

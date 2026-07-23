@@ -49,6 +49,9 @@ class Boss(Service):
         self.active_installation_task_changed = Signal()
         self._installation_status = InstallationStatus.NOT_STARTED
         self.installation_status_changed = Signal()
+        self._pending_error_message = ""
+        self._pending_error_type = ""
+        self.pending_error_changed = Signal()
 
         self._module_manager.module_observers_changed.connect(
             self._kickstart_manager.on_module_observers_changed
@@ -115,6 +118,22 @@ class Boss(Service):
         """
         return self._installation_status
 
+    @property
+    def pending_error_message(self):
+        """The pending error message awaiting a UI response.
+
+        :return: an error message string or empty string
+        """
+        return self._pending_error_message
+
+    @property
+    def pending_error_type(self):
+        """The type of the pending error awaiting a UI response.
+
+        :return: an error type string or empty string
+        """
+        return self._pending_error_type
+
     def get_installation_task(self):
         """Get the active installation task, if any.
 
@@ -154,12 +173,17 @@ class Boss(Service):
         self._installation_task.stopped_signal.connect(
             self._on_installation_stopped
         )
+        self._installation_task.error_raised_signal.connect(
+            self._on_error_raised
+        )
 
         return [self._installation_task]
 
     def _on_installation_started(self):
         """Handle the installation task start."""
         log.info("The installation has started.")
+        self._pending_error_message = ""
+        self._pending_error_type = ""
         self._installation_status = InstallationStatus.RUNNING
         self.installation_status_changed.emit()
         self.active_installation_task_changed.emit()
@@ -175,6 +199,25 @@ class Boss(Service):
         log.error("The installation has failed.")
         self._installation_status = InstallationStatus.FAILED
         self.installation_status_changed.emit()
+
+        if self._installation_task is not None:
+            self._pending_error_message = \
+                self._installation_task.pending_error_message
+            self._pending_error_type = \
+                self._installation_task.pending_error_type
+            self.pending_error_changed.emit()
+
+    def _on_error_raised(self, message, error_type):
+        """Handle a non-critical error raised during installation.
+
+        Stores the error so a reconnecting UI can discover it.
+
+        :param message: the error message
+        :param error_type: the error type string
+        """
+        self._pending_error_message = message
+        self._pending_error_type = error_type
+        self.pending_error_changed.emit()
 
     def _on_installation_stopped(self):
         """Handle the installation task stop."""
