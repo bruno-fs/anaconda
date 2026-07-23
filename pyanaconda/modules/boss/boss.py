@@ -28,6 +28,7 @@ from pyanaconda.modules.boss.installation import (
 from pyanaconda.modules.boss.kickstart_manager import KickstartManager
 from pyanaconda.modules.boss.module_manager import ModuleManager
 from pyanaconda.modules.common.base import Service
+from pyanaconda.modules.common.constants.installation import InstallationStatus
 from pyanaconda.modules.common.constants.services import BOSS
 from pyanaconda.modules.common.containers import TaskContainer
 
@@ -46,6 +47,8 @@ class Boss(Service):
         self._install_manager = InstallManager()
         self._installation_task = None
         self.active_installation_task_changed = Signal()
+        self._installation_status = InstallationStatus.NOT_STARTED
+        self.installation_status_changed = Signal()
 
         self._module_manager.module_observers_changed.connect(
             self._kickstart_manager.on_module_observers_changed
@@ -104,6 +107,14 @@ class Boss(Service):
         """
         return self._install_manager.collect_requirements()
 
+    @property
+    def installation_status(self):
+        """The current installation status.
+
+        :return: an InstallationStatus value
+        """
+        return self._installation_status
+
     def get_installation_task(self):
         """Get the active installation task, if any.
 
@@ -134,6 +145,12 @@ class Boss(Service):
         self._installation_task.started_signal.connect(
             self._on_installation_started
         )
+        self._installation_task.succeeded_signal.connect(
+            self._on_installation_succeeded
+        )
+        self._installation_task.failed_signal.connect(
+            self._on_installation_failed
+        )
         self._installation_task.stopped_signal.connect(
             self._on_installation_stopped
         )
@@ -143,7 +160,21 @@ class Boss(Service):
     def _on_installation_started(self):
         """Handle the installation task start."""
         log.info("The installation has started.")
+        self._installation_status = InstallationStatus.RUNNING
+        self.installation_status_changed.emit()
         self.active_installation_task_changed.emit()
+
+    def _on_installation_succeeded(self):
+        """Handle the installation task success."""
+        log.info("The installation has succeeded.")
+        self._installation_status = InstallationStatus.SUCCEEDED
+        self.installation_status_changed.emit()
+
+    def _on_installation_failed(self):
+        """Handle the installation task failure."""
+        log.error("The installation has failed.")
+        self._installation_status = InstallationStatus.FAILED
+        self.installation_status_changed.emit()
 
     def _on_installation_stopped(self):
         """Handle the installation task stop."""
