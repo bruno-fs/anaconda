@@ -157,6 +157,7 @@ class Boss(Service):
         if self._installation_task is not None:
             return [self._installation_task]
 
+        self._installation_status = InstallationStatus.NOT_STARTED
         self._installation_task = RunInstallationTask(
             install_manager=self._install_manager,
         )
