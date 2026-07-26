@@ -201,13 +201,6 @@ class Boss(Service):
         self._installation_status = InstallationStatus.FAILED
         self.installation_status_changed.emit()
 
-        if self._installation_task is not None:
-            self._pending_error_message = \
-                self._installation_task.pending_error_message
-            self._pending_error_type = \
-                self._installation_task.pending_error_type
-            self.pending_error_changed.emit()
-
     def _on_error_raised(self, message, error_type):
         """Handle a non-critical error raised during installation.
 

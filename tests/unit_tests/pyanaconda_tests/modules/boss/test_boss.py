@@ -285,7 +285,7 @@ class BossInterfaceTestCase(unittest.TestCase):
 
     def test_installation_status_default(self):
         """Test that InstallationStatus defaults to NOT_STARTED."""
-        assert self.interface.InstallationStatus == 0
+        assert self.interface.InstallationStatus == InstallationStatus.NOT_STARTED.value
         assert self.module.installation_status == InstallationStatus.NOT_STARTED
 
     @patch_dbus_publish_object
@@ -299,7 +299,7 @@ class BossInterfaceTestCase(unittest.TestCase):
 
         self.module._on_installation_started()
 
-        assert self.interface.InstallationStatus == 1
+        assert self.interface.InstallationStatus == InstallationStatus.RUNNING.value
         assert self.module.installation_status == InstallationStatus.RUNNING
         callback.assert_called()
 
@@ -317,7 +317,7 @@ class BossInterfaceTestCase(unittest.TestCase):
 
         self.module._on_installation_succeeded()
 
-        assert self.interface.InstallationStatus == 2
+        assert self.interface.InstallationStatus == InstallationStatus.SUCCEEDED.value
         assert self.module.installation_status == InstallationStatus.SUCCEEDED
         callback.assert_called()
 
@@ -342,13 +342,66 @@ class BossInterfaceTestCase(unittest.TestCase):
 
         self.module._on_installation_failed()
 
-        assert self.interface.InstallationStatus == 3
+        assert self.interface.InstallationStatus == InstallationStatus.FAILED.value
         assert self.module.installation_status == InstallationStatus.FAILED
         status_callback.assert_called()
 
         assert self.interface.PendingErrorMessage == "Something went wrong"
         assert self.interface.PendingErrorType == "fatal"
         error_callback.assert_called()
+
+    @patch_dbus_publish_object
+    def test_installation_status_reset_on_new_task(self, publisher):
+        """Test that InstallationStatus resets to NOT_STARTED on new task."""
+        task_paths = self.interface.InstallWithTasks()
+        task_proxy = check_task_creation(task_paths[0], publisher, RunInstallationTask)
+        task = task_proxy.implementation
+
+        task._pending_error_message = "Something went wrong"
+        task._pending_error_type = "fatal"
+
+        self.module._on_installation_started()
+        self.module._on_installation_failed()
+        self.module._on_installation_stopped()
+
+        assert self.interface.InstallationStatus == InstallationStatus.FAILED.value
+
+        self.interface.InstallWithTasks()
+
+        assert self.interface.InstallationStatus == InstallationStatus.NOT_STARTED.value
+        assert self.module.installation_status == InstallationStatus.NOT_STARTED
+
+    @patch_dbus_publish_object
+    def test_pending_error_on_non_critical(self, publisher):
+        """Test that PendingErrorMessage is set on non-critical error."""
+        callback = Mock()
+        self.module.pending_error_changed.connect(callback)
+
+        task_paths = self.interface.InstallWithTasks()
+        check_task_creation(task_paths[0], publisher, RunInstallationTask)
+
+        self.module._on_installation_started()
+
+        self.module._on_error_raised("Missing package", "yesno")
+
+        assert self.interface.PendingErrorMessage == "Missing package"
+        assert self.interface.PendingErrorType == "yesno"
+        callback.assert_called()
+
+    @patch_dbus_publish_object
+    def test_pending_error_cleared_on_start(self, publisher):
+        """Test that pending error is cleared when installation starts."""
+        task_paths = self.interface.InstallWithTasks()
+        check_task_creation(task_paths[0], publisher, RunInstallationTask)
+
+        self.module._on_error_raised("Some error", "yesno")
+
+        assert self.interface.PendingErrorMessage == "Some error"
+
+        self.module._on_installation_started()
+
+        assert self.interface.PendingErrorMessage == ""
+        assert self.interface.PendingErrorType == ""
 
     def test_quit(self):
         """Test Quit."""
