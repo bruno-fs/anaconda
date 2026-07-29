@@ -331,6 +331,7 @@ class RunInstallationTask(InstallationTask):
         self._total_steps = 0
         self._install_manager = install_manager
         self._error_raised_signal = Signal()
+        self._error_responded_signal = Signal()
         self._error_response_event = Event()
         self._error_should_continue = False
 
@@ -342,6 +343,14 @@ class RunInstallationTask(InstallationTask):
         """
         return self._error_raised_signal
 
+    @property
+    def error_responded_signal(self):
+        """Signal emitted after the user responds to an error.
+
+        Carries the should_continue boolean.
+        """
+        return self._error_responded_signal
+
     def _show_dialog(self, message, dialog_type):
         """Emit error signal and block until UI responds.
 
@@ -351,6 +360,7 @@ class RunInstallationTask(InstallationTask):
         self._error_response_event.clear()
         self._error_raised_signal.emit(message, dialog_type.value)
         self._error_response_event.wait()
+        self._error_responded_signal.emit(self._error_should_continue)
         return self._error_should_continue
 
     def respond_to_error(self, should_continue):
@@ -363,7 +373,7 @@ class RunInstallationTask(InstallationTask):
 
     def _thread_failed_callback(self, *exc_info):
         """Emit the fatal error before reporting the failure."""
-        self._error_raised_signal.emit(str(exc_info[1]), "fatal")
+        self._error_raised_signal.emit(str(exc_info[1]), InstallationErrorDialogType.FATAL_ERROR)
         super()._thread_failed_callback(*exc_info)
 
     @property

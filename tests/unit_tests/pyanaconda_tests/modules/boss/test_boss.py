@@ -323,7 +323,7 @@ class BossInterfaceTestCase(unittest.TestCase):
 
     @patch_dbus_publish_object
     def test_installation_status_failed(self, publisher):
-        """Test that InstallationStatus changes to FAILED on failure."""
+        """Test that InstallationStatus changes to FAILED on fatal error."""
         status_callback = Mock()
         error_callback = Mock()
         self.module.installation_status_changed.connect(status_callback)
@@ -333,14 +333,11 @@ class BossInterfaceTestCase(unittest.TestCase):
         task_proxy = check_task_creation(task_paths[0], publisher, RunInstallationTask)
         task = task_proxy.implementation
 
-        # Simulate a fatal error stored on the task.
-        task._pending_error_message = "Something went wrong"
-        task._pending_error_type = "fatal"
-
         self.module._on_installation_started()
         status_callback.reset_mock()
 
-        self.module._on_installation_failed()
+        # Simulate a fatal error via error_raised_signal
+        task.error_raised_signal.emit("Something went wrong", "fatal")
 
         assert self.interface.InstallationStatus == InstallationStatus.FAILED.value
         assert self.module.installation_status == InstallationStatus.FAILED
@@ -357,10 +354,8 @@ class BossInterfaceTestCase(unittest.TestCase):
         task_proxy = check_task_creation(task_paths[0], publisher, RunInstallationTask)
         task = task_proxy.implementation
 
-        task._pending_error_message = "Something went wrong"
-        task._pending_error_type = "fatal"
-
         self.module._on_installation_started()
+        task.error_raised_signal.emit("Something went wrong", "fatal")
         self.module._on_installation_failed()
         self.module._on_installation_stopped()
 

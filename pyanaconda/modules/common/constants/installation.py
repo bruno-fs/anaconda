@@ -22,10 +22,10 @@ from enum import Enum
 class InstallationStatus(Enum):
     """Status of the installation process tracked by the Boss module."""
 
-    NOT_STARTED = 0
-    RUNNING = 1
-    SUCCEEDED = 2
-    FAILED = 3
+    NOT_STARTED = 1
+    RUNNING = 2
+    SUCCEEDED = 3
+    FAILED = 4
 
 
 class InstallationErrorDialogType(Enum):

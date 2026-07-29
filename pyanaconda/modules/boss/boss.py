@@ -28,7 +28,10 @@ from pyanaconda.modules.boss.installation import (
 from pyanaconda.modules.boss.kickstart_manager import KickstartManager
 from pyanaconda.modules.boss.module_manager import ModuleManager
 from pyanaconda.modules.common.base import Service
-from pyanaconda.modules.common.constants.installation import InstallationStatus
+from pyanaconda.modules.common.constants.installation import (
+    InstallationErrorDialogType,
+    InstallationStatus,
+)
 from pyanaconda.modules.common.constants.services import BOSS
 from pyanaconda.modules.common.containers import TaskContainer
 
@@ -149,15 +152,20 @@ class Boss(Service):
         """Return installation tasks of this module.
 
         If an installation task is already running, return
-        the existing task to allow reconnection. Otherwise,
-        create a new one.
+        the existing task to allow reconnection. If it is
+        completed, return an empty list. Otherwise, create
+        a new one.
 
         :return: a list of installation tasks
         """
         if self._installation_task is not None:
             return [self._installation_task]
 
-        self._installation_status = InstallationStatus.NOT_STARTED
+        if self._installation_status == InstallationStatus.SUCCEEDED:
+            log.debug("Installation already finished.")
+            return []
+
+        #self._installation_status = InstallationStatus.NOT_STARTED
         self._installation_task = RunInstallationTask(
             install_manager=self._install_manager,
         )
@@ -176,6 +184,9 @@ class Boss(Service):
         )
         self._installation_task.error_raised_signal.connect(
             self._on_error_raised
+        )
+        self._installation_task.error_responded_signal.connect(
+            self._on_error_responded
         )
 
         return [self._installation_task]
@@ -209,8 +220,31 @@ class Boss(Service):
         :param message: the error message
         :param error_type: the error type string
         """
+        log.info("Error raised: type=%s, message=%s", error_type, message[:80])
         self._pending_error_message = message
         self._pending_error_type = error_type
+        self.pending_error_changed.emit()
+
+        if error_type != InstallationErrorDialogType.YES_NO.value:
+            self._installation_status = InstallationStatus.FAILED
+            self.installation_status_changed.emit()
+
+    def _on_error_responded(self, should_continue):
+        """Handle the user's response to a pending error.
+
+        If the user chose to continue, clear the pending error.
+        If the user chose to abort, promote the error to fatal.
+        """
+        if should_continue:
+            log.info("User chose to continue past the error.")
+            self._pending_error_message = ""
+            self._pending_error_type = ""
+        else:
+            log.info("User chose to abort — promoting error to fatal.")
+            self._pending_error_type = InstallationErrorDialogType.FATAL_ERROR.value
+            self._installation_status = InstallationStatus.FAILED
+            self.installation_status_changed.emit()
+
         self.pending_error_changed.emit()
 
     def _on_installation_stopped(self):
