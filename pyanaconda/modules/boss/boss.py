@@ -165,7 +165,6 @@ class Boss(Service):
             log.debug("Installation already finished.")
             return []
 
-        #self._installation_status = InstallationStatus.NOT_STARTED
         self._installation_task = RunInstallationTask(
             install_manager=self._install_manager,
         )
