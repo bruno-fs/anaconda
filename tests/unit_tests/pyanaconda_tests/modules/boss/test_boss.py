@@ -26,6 +26,7 @@ from pyanaconda.modules.boss.boss import Boss
 from pyanaconda.modules.boss.boss_interface import BossInterface
 from pyanaconda.modules.boss.installation import RunInstallationTask
 from pyanaconda.modules.boss.module_manager.start_modules import StartModulesTask
+from pyanaconda.modules.common.constants.installation import InstallationStatus
 from pyanaconda.modules.common.structures.requirement import Requirement
 from tests.unit_tests.pyanaconda_tests import (
     check_task_creation,
@@ -281,6 +282,65 @@ class BossInterfaceTestCase(unittest.TestCase):
 
         self.module._on_installation_stopped()
         callback.assert_called()
+
+    def test_installation_status_default(self):
+        """Test that InstallationStatus defaults to NOT_STARTED."""
+        assert self.interface.InstallationStatus == InstallationStatus.NOT_STARTED
+        assert self.module.installation_status == InstallationStatus.NOT_STARTED
+
+    @patch_dbus_publish_object
+    def test_installation_status_running(self, publisher):
+        """Test that InstallationStatus changes to RUNNING when started."""
+        callback = Mock()
+        self.module.installation_status_changed.connect(callback)
+
+        task_paths = self.interface.InstallWithTasks()
+        check_task_creation(task_paths[0], publisher, RunInstallationTask)
+
+        self.module._on_installation_started()
+
+        assert self.interface.InstallationStatus == InstallationStatus.RUNNING
+        assert self.module.installation_status == InstallationStatus.RUNNING
+        callback.assert_called()
+
+    @patch_dbus_publish_object
+    def test_installation_status_succeeded(self, publisher):
+        """Test that InstallationStatus changes to SUCCEEDED on success."""
+        callback = Mock()
+        self.module.installation_status_changed.connect(callback)
+
+        task_paths = self.interface.InstallWithTasks()
+        check_task_creation(task_paths[0], publisher, RunInstallationTask)
+
+        self.module._on_installation_started()
+        callback.reset_mock()
+
+        self.module._on_installation_succeeded()
+
+        assert self.interface.InstallationStatus == InstallationStatus.SUCCEEDED
+        assert self.module.installation_status == InstallationStatus.SUCCEEDED
+        callback.assert_called()
+
+    @patch_dbus_publish_object
+    def test_installation_status_failed(self, publisher):
+        """Test that InstallationStatus changes to FAILED on fatal error."""
+        status_callback = Mock()
+        self.module.installation_status_changed.connect(status_callback)
+        # self.module.pending_error_changed.connect(error_callback)
+
+        task_paths = self.interface.InstallWithTasks()
+        task_proxy = check_task_creation(task_paths[0], publisher, RunInstallationTask)
+        task = task_proxy.implementation
+
+        self.module._on_installation_started()
+        status_callback.reset_mock()
+
+        # Simulate a fatal error via error_raised_signal
+        task.error_raised_signal.emit("Something went wrong", "error")
+
+        assert self.interface.InstallationStatus == InstallationStatus.FAILED
+        assert self.module.installation_status == InstallationStatus.FAILED
+        status_callback.assert_called()
 
     def test_quit(self):
         """Test Quit."""

@@ -16,7 +16,19 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
-from enum import StrEnum
+from enum import IntEnum, StrEnum
+
+
+class InstallationStatus(IntEnum):
+    """Status of the installation process tracked by the Boss module."""
+
+    # We start with 1 instead of 0 so we can have some syntatic sugar
+    # for checking status (e.g., on webui we can do "!status" to check if
+    # it was set, which wouldn't be possible with a falsy value like 0)
+    NOT_STARTED = 1
+    RUNNING = 2
+    SUCCEEDED = 3
+    FAILED = 4
 
 
 class InstallationErrorDialogType(StrEnum):

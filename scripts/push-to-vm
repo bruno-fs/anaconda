@@ -1,0 +1,20 @@
+#!/bin/bash
+# Push pyanaconda sources to a running test VM.
+# Run from the anaconda repo root.
+# Usage: scripts/push-to-vm [PORT]
+PORT="${1:-2201}"
+SSH_OPTS="-o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -o ConnectTimeout=5"
+SSH_KEY="${WEBUI_DIR:-../anaconda-webui}/bots/machine/identity"
+SITE_PACKAGES="/usr/lib64/python3.15/site-packages"
+
+if [ ! -d pyanaconda ]; then
+    echo "Run from the anaconda repo root." >&2
+    exit 1
+fi
+
+echo "Pushing pyanaconda to VM (port $PORT)..."
+rsync -az --delete \
+    -e "ssh -i $SSH_KEY $SSH_OPTS -p $PORT" \
+    pyanaconda/ "root@127.0.0.2:${SITE_PACKAGES}/pyanaconda/"
+
+echo "Done. Run reset-installation-status to apply."
