@@ -228,7 +228,7 @@ jobs:
       - name: Check out kickstart-tests
         uses: actions/checkout@v7
         with:
-          repository: rhinstaller/kickstart-tests
+          repository: bruno-fs/kickstart-tests
           fetch-depth: 0
           path: kickstart-tests
 
